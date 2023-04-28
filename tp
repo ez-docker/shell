@@ -1,0 +1,597 @@
+#!/usr/bin/env bash
+# -*- coding: UTF-8 -*-
+export LANG=zh_CN.UTF-8
+
+update=false
+debug=true
+
+
+function parse_args () {
+    local args=( "$@" )
+    for arg in "${args[@]}"; do
+        if [[ "$arg" == "-d" || "$arg" == "debug" ]]; then
+            if $update; then
+                echo "Error: update 和 debug 选项不能一起使用."
+                return 1
+            fi
+            declare -g debug=true
+        elif [[ "$arg" == "-u" || "$arg" == "update" ]]; then
+            if $debug; then
+                echo "Error: debug 和 update 选项不能一起使用."
+                return 1
+            fi
+            declare -g update=true
+        fi
+    done
+}
+
+function update_file() {
+    local source_file="$1"
+    local target_file="$2"
+
+    if ! cmp -s "$source_file" "$target_file"; then
+        cp -f "$source_file" "$target_file"
+        echo "$target_file 已更新"
+    fi
+}
+
+function ver_sort() {
+    # 用于检测是否满足最低版本需求
+    # 接受两个参数，以 version-sort 方式排序后返回第一个参数
+    # 将传入的两个参数放入数组中
+    local arr=("$1" "$2")
+    # 对数组中的元素进行 version-sort 排序，并取出第一个元素
+    local sorted=$(printf '%s\n' "${arr[@]}" | sort --version-sort | head -n 1)
+    # 判断排序后的结果是否等于第一个参数
+    if [[ "$sorted" == "$1" ]]; then
+        # echo "Success"
+        return 0
+    else
+        # echo "Failed"
+        return 1
+    fi
+}
+
+function check_os_ver(){
+    case "$ID" in
+        almalinux)
+            local req_ver=${almalinux_ver}
+            cur_ver=${VERSION_ID}
+            ver_sort "${req_ver}" "${cur_ver}"
+            if [[ $? -eq 1 ]]; then
+                OSverSig="err"
+            fi
+            ;;
+
+        centos)
+            local req_ver=${centos_ver}
+            local cur_ver=$(cat /etc/redhat-release | awk '{print $4}' | awk -F. '{print $1"."$2}')
+            ver_sort "${req_ver}" "${cur_ver}"
+            if [[ $? -eq 1 ]]; then
+                OSverSig="err"
+            fi
+            ;;
+
+        debian)
+            local req_ver=${debian_ver}
+            local cur_ver=$(cat /etc/debian_version)
+            ver_sort "${req_ver}" "${cur_ver}"
+            if [[ $? -eq 1 ]]; then
+                OSverSig="err"
+            fi
+            ;;
+
+        ubuntu)
+            local req_ver=${ubuntu_ver}
+            cur_ver=${VERSION_ID}
+            ver_sort "${req_ver}" "${cur_ver}"
+            if [[ $? -eq 1 ]]; then
+                OSverSig="err"
+            fi
+            ;;
+
+        *)
+            echo -e "\033[31mFailed\033[0m：该脚本仅支持 CentOS、Alma、Debian 和 Ubuntu, 当前为 ${ID} ${VERSION_ID}"
+            return 1
+            ;;
+    esac
+
+    if [ -n "$OSverSig" ]; then
+        echo -e "\033[31mFailed\033[0m: 当前为 ${ID} ${cur_ver}, 不符合最低要求${ID} ${req_ver}"
+        return 1
+    else
+        if [ "$debug" = true ]; then
+            # echo "debug: 当前为 ${ID} ${cur_ver}, 符合最低要求${ID} ${req_ver}"
+            printf "%-26s %-10s %-20s %-10s\n" "debug: ${ID}" ${cur_ver} "符合最低要求" ${req_ver}
+            return 0
+        fi
+    fi
+}
+
+function check_os_kernel(){
+    # 定义函数，用于获取操作系统内核版本号
+    local req_ver="$1"
+    local cur_ver=$(uname -r | cut -d'-' -f1)
+
+    ver_sort "${req_ver}" "${cur_ver}"
+    if [[ $? -eq 0 ]]; then
+        if [ "$debug" = true ]; then
+            printf "%-26s %-10s %-20s %-10s\n" "debug: kernel" ${cur_ver} "符合最低要求" ${req_ver}
+        fi
+        return 0
+    else
+        echo -e "\033[31mFailed\033[0m：该脚本仅支持 内核 ${req_ver} 或以上版本, 当前为 ${cur_ver}"
+        return 1
+    fi
+}
+
+function check_python_ver() {
+    command -v python3 > /dev/null
+    if [[ $? -eq 0 ]]; then
+        local req_ver=$1
+        local cur_ver=$(python3 -c "import platform; print(platform.python_version())")
+        ver_sort "${req_ver}" "${cur_ver}"
+        if [[ $? -eq 0 ]]; then
+            if [ "$debug" = true ]; then
+                # echo "debug: 当前为 Python${cur_ver}, 符合最低要求 ${req_ver}"
+                printf "%-26s %-10s %-20s %-10s\n" "debug: Python" ${cur_ver} "符合最低要求" ${req_ver}
+                return 0
+            fi
+        else
+            echo -e "\033[31mFailed\033[0m: 当前为 Python${cur_ver}, 不符合最低要求 ${req_ver}"
+            # install_python
+            return 1
+        fi
+    else
+        echo -e "\033[31mFailed\033[0m: 当前 Python3 未安装, 不符合最低要求 ${req_ver}"
+        # install_python
+        return 1
+    fi
+}
+
+function check_docker_ver() {
+    local req_ver=$1
+    command -v docker > /dev/null
+    if [[ $? -eq 0 ]]; then
+        local cur_ver=$(docker --version | awk '{print $3}' | cut -d ',' -f1) # 检测软件 版本是否符合最低要求
+        ver_sort "${req_ver}" "${cur_ver}"
+        if [[ $? -eq 0 ]]; then
+            if [ "$debug" = true ]; then
+                printf "%-26s %-10s %-20s %-10s\n" "debug: docker" ${cur_ver} "符合最低要求" ${req_ver}
+            fi
+            return 0
+        else
+            install_docker
+            return 1
+        fi
+    else
+        install_docker
+        return 1
+    fi
+}
+
+function check_docker_ver() {
+    local req_ver=$1
+    command -v docker > /dev/null
+    if [[ $? -eq 0 ]]; then
+        local cur_ver=$(docker --version | awk '{print $3}' | cut -d ',' -f1) # 检测软件 版本是否符合最低要求
+        ver_sort "${req_ver}" "${cur_ver}"
+        if [[ $? -eq 0 ]]; then
+            if [ "$debug" = true ]; then
+                printf "%-26s %-10s %-20s %-10s\n" "debug: docker" ${cur_ver} "符合最低要求" ${req_ver}
+            fi
+            return 0
+        else
+            install_docker
+            return 1
+        fi
+    else
+        install_docker
+        return 1
+    fi
+}
+
+function check_docker_space() {
+    command -v docker > /dev/null # 检测软件有无安装
+    if [[ $? -eq 0 ]]; then
+        # 获取主目录
+        local docker_dir=$(docker info | grep -oP "(?<=Docker Root Dir: )(\S+)")
+        if [ "${docker_dir}" = "/opt/docker_root" ]; then
+            local cur_ver=$(df -BG "${docker_dir}" | awk 'FNR==2{print $4}' | sed 's/G//')
+            local req_ver=$1
+            if [ "${cur_ver}" -gt "${req_ver}" ]; then
+                if [ "$debug" = true ]; then
+                    printf "%-26s %-10s %-20s %-10s\n" "debug: ${docker_dir}" "${cur_ver} GB" "符合最低要求" "$1 GB"
+                fi
+                return 0
+            else
+                echo -e "\033[31mFailed\033[0m：该脚本仅支持 docker主目录${docker_dir} 剩余空间大于 ${minimum_space}GB, 当前为 ${minimum_space}GB"
+            return 1
+            fi
+        else
+            printf "debug: docker 目录 非预设" && sleep 1
+            printf "\033[2K\r"; printf "debug: 停止 docker 服务" && sleep 1
+            systemctl stop docker
+
+            printf "\033[2K\r"; printf "debug: 修改 docker 目录" && sleep 1
+            mkdir -p /etc/docker
+            mkdir -p /opt/docker_root
+            # 生成 daemon.json 配置文件
+            printf '%s\n' '{' \
+                '    "registry-mirrors": [' \
+                '        "https://docker.mirrors.ustc.edu.cn",' \
+                '        "http://hub-mirror.c.163.com",' \
+                '        "https://registry.docker-cn.com"' \
+                '    ],' \
+                '    "data-root": "/opt/docker_root"' \
+                '}' \
+                > /etc/docker/daemon.json
+            systemctl daemon-reload
+            systemctl start docker
+            printf "\033[2K\r"; printf "debug: 修改 docker 目录" && sleep 1
+            printf "\033[2K\r";
+            check_docker_space ${docker_space} || exit 1
+            return 1
+        fi
+    else
+        echo -e "\033[31mFailed\033[0m：docker 未安装"
+        return 1
+    fi
+}
+
+function check_docker_compose() {
+    command -v docker-compose > /dev/null # 检测软件有无安装
+    if [[ $? -eq 0 ]]; then
+        local cur_ver=$(docker-compose version --short) # 检测软件 版本是否符合最低要求
+        local req_ver=$1
+        ver_sort "${cur_ver}" "${req_ver}"
+        if [[ $? -eq 0 ]]; then
+            if [ "$debug" = true ]; then
+                printf "%-26s %-10s %-20s %-10s\n" "debug: docker-compose" ${cur_ver} "符合最低要求" $1
+                return 0
+            fi
+        else
+            install_docker_compose $1
+        fi
+    else
+        install_docker_compose $1
+    fi
+}
+
+function install_python() {
+    local version_array=(${1//./ })
+    local major_version=${version_array[0]}
+    local minor_version=${version_array[1]}
+    local patch_version=${version_array[2]}
+
+    install_path=/usr/local/python${major_version} # 要安装的路径
+    mkdir -p $install_path
+    echo "即将安装 Python ${major_version}.${minor_version}.${patch_version}"
+    echo "安装路径为 ${install_path}"
+    
+    yum install -y wget nano zlib-devel bzip2 bzip2-devel readline-devel sqlite sqlite-devel openssl-devel xz xz-devel libffi-devel >/dev/null 2>&1
+
+    echo "正在下载 Python-${major_version}.${minor_version}.${patch_version}"
+    wget -c --progress=bar:force https://mirrors.huaweicloud.com/python/${major_version}.${minor_version}.${patch_version}/Python-${major_version}.${minor_version}.${patch_version}.tgz 2>&1 | progressfilt
+
+    echo "正在解压 Python ${major_version}.${minor_version}.${patch_version}"
+    tar -xzf Python-${major_version}.${minor_version}.${patch_version}.tgz >/dev/null
+    rm -rf Python-${major_version}.${minor_version}.${patch_version}.tgz
+
+    echo "正在编译和安装 Python ${major_version}.${minor_version}.${patch_version}"
+    cd Python-${major_version}.${minor_version}.${patch_version}
+    # ./configure -prefix=$install_path -with-openssl=/usr/local/openssl -enable-optimizations >/dev/null
+    ./configure --prefix=$install_path --with-openssl=/usr/local/openssl >/dev/null
+
+    make clean >/dev/null
+    make -j4 >/dev/null
+    make install >/dev/null
+    cd ..
+    rm -rf Python-${major_version}.${minor_version}.${patch_version}
+
+    echo "配置软链接"
+    rm -f /usr/bin/python${major_version} /usr/bin/pip${major_version}
+    ln -sf $install_path/bin/python${major_version} /usr/bin/python${major_version}
+    ln -sf $install_path/bin/pip${major_version} /usr/bin/pip${major_version}
+    ln -sf $install_path/bin/python${major_version} /usr/bin/python
+    echo "修复yumFailed"
+    replace_yum /usr/bin/yum
+    replace_yum /usr/libexec/urlgrabber-ext-down
+    echo "完成安装 Python ${major_version}.${minor_version}.${patch_version}"
+}
+
+function install_docker() {
+    if [ "$debug" = true ]; then
+        printf "debug: 当前 docker 不符合最低要求, 正在下载安装包."
+    fi
+    # 获取最新版本号
+    local cur_ver=$(curl -s https://api.github.com/repos/moby/moby/releases/latest | sed -n 's/.*"tag_name": "\(.*\)",/\1/p' | cut -c 2-)
+    printf "\033[2K\r"; printf "debug: 安装 docker ."
+    dnf update -y > /dev/null 2>&1
+
+    printf "\033[2K\r"; printf "debug: 安装 docker .."
+    dnf install -y yum-utils device-mapper-persistent-data lvm2 > /dev/null 2>&1
+
+    printf "\033[2K\r"; printf "debug: 安装 docker ..."
+    yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo > /dev/null 2>&1
+    dnf install -y docker-ce docker-ce-cli containerd.io > /dev/null 2>&1
+    dnf install -y yum-utils device-mapper-persistent-data lvm2 > /dev/null 2>&1
+    if [[ $? -eq 0 ]]; then
+        printf "\033[2K\r";
+        printf "\033[2K\r"; printf "debug: 启动 docker."
+
+        mkdir -p /etc/docker
+        mkdir -p /opt/docker_root
+        # 生成 daemon.json 配置文件
+        printf '%s\n' '{' \
+            '    "registry-mirrors": [' \
+            '        "https://docker.mirrors.ustc.edu.cn",' \
+            '        "http://hub-mirror.c.163.com",' \
+            '        "https://registry.docker-cn.com"' \
+            '    ],' \
+            '    "data-root": "/opt/docker_root"' \
+            '}' \
+            > /etc/docker/daemon.json
+
+        systemctl daemon-reload
+        systemctl start docker
+        systemctl enable docker
+        docker --version
+    else
+        printf "\033[2K\r"; printf "debug: 安装 docker 失败, 请手动安装."
+    fi
+
+    exit 0
+
+    case "$ID" in
+        almalinux)
+            # 卸载 docker 旧版本
+            sudo dnf remove docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-selinux docker-engine-selinux docker-engine
+            # 安装 docker 依赖
+            sudo dnf -y install yum-utils device-mapper-persistent-data lvm2
+            # 添加阿里源
+            sudo dnf config-manager --add-repo=https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
+            sudo dnf makecache
+            # 安装 docker 新版本
+            sudo dnf install -y docker-ce docker-ce-cli containerd.io
+            sudo systemctl start docker
+            mkdir -p /etc/docker
+            mkdir -p /opt/docker_root
+
+            cd /etc/docker
+            if [ ! -f "daemon.json" ]; then
+                touch "daemon.json"
+            else
+                rm -rf daemon.json
+                touch "daemon.json"
+            fi
+
+            printf '{
+            "registry-mirrors": [
+                "https://docker.mirrors.ustc.edu.cn",
+                "http://hub-mirror.c.163.com",
+                "https://registry.docker-cn.com"
+            ],
+            "data-root": "/opt/docker_root"
+            }' > /etc/docker/daemon.json
+
+            systemctl enable docker
+            systemctl start docker
+            systemctl daemon-reload
+            systemctl restart docker
+            systemctl start docker
+            
+            docker info
+            echo -e "完成安装docker"
+        ;;
+        centos)
+            # 卸载旧版本的 Docker
+            sudo yum remove -y docker docker-common docker-selinux docker-engine
+
+            # 安装需要的软件包
+            sudo yum install -y yum-utils device-mapper-persistent-data lvm2
+
+            # 设置 Docker CE 镜像仓库
+            sudo yum-config-manager --add-repo http://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
+
+            # 安装最新版本的 Docker CE
+            sudo yum install -y docker-ce
+
+            cd /etc/docker
+            if [ ! -f "daemon.json" ]; then
+                touch "daemon.json"
+            else
+                rm -rf daemon.json
+                touch "daemon.json"
+            fi
+
+            printf '{
+            "registry-mirrors": [
+                "https://docker.mirrors.ustc.edu.cn",
+                "http://hub-mirror.c.163.com",
+                "https://registry.docker-cn.com"
+            ],
+            "data-root": "/opt/docker_root"
+            }' > /etc/docker/daemon.json
+
+
+            # 设置 Docker 开机自启
+            sudo systemctl enable docker
+            sudo systemctl start docker
+            sudo systemctl daemon-reload
+            sudo systemctl restart docker
+            sudo systemctl start docker
+            
+            docker info
+            echo -e "完成安装docker"
+        ;;
+        debian)
+            echo "deb http://ftp.sjtu.edu.cn/debian bullseye main contrib non-free" | tee /etc/apt/sources.list
+            echo "deb-src http://ftp.sjtu.edu.cn/debian bullseye main contrib non-free" | tee -a /etc/apt/sources.list
+
+            apt-get install apt-transport-https ca-certificates curl gnupg lsb-release
+            apt-get install apt-transport-https ca-certificates curl software-properties-common gnupg2
+
+            curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+            apt-get install docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+
+
+
+            # 卸载旧版本的 Docker
+            apt-get remove -y docker docker-engine docker.io containerd runc
+
+
+            # 安装需要的软件包
+            apt-get update
+            apt-get -y upgrade
+            apt-get -f install
+
+            apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
+
+            # 添加 Docker CE GPG 密钥
+            curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+            # 设置 Docker CE 镜像仓库
+            echo \
+             "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://mirrors.aliyun.com/docker-ce/linux/debian \
+             $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker-ce.list >/dev/null
+
+            # 安装最新版本的 Docker CE
+            apt-get update
+            apt-get install -y docker-ce docker-ce-cli
+
+            # 启动 Docker 服务
+            systemctl start docker
+
+            # 设置 Docker 开机自启
+            systemctl enable docker
+        ;;
+        *)
+            echo "不支持的系统"
+            exit 1
+        ;;
+    esac
+    # yum makecache fast >/dev/null 2>&1
+}
+
+function install_docker_compose() {
+    if [ "$debug" = true ]; then
+        echo "debug: 当前 docker-compose 不符合最低要求 $1, 正在重装."
+    fi
+    if [ -z "$1" ]; then
+        echo "请指定要安装的docker-compose版本"
+        return 1
+    fi
+    DOWNLOAD_URL="https://dn-dao-github-mirror.daocloud.io/docker/compose/releases/download/v$1/docker-compose-$(uname -s)-$(uname -m)"
+    if ! curl -L "$DOWNLOAD_URL" -o /usr/local/bin/docker-compose > /dev/null 2>&1; then
+        echo "无法下载docker-compose二进制文件，请检查网络连接和版本号是否正确"
+        return 1
+    fi
+    chmod +x /usr/local/bin/docker-compose
+    if [ "$debug" = true ]; then
+        echo "debug: docker-compose $(docker-compose version --short) 安装成功"
+    fi
+}
+
+
+
+
+function main () {
+    parse_args "$@" || exit 1   # 解析命令行参数和选项
+    if $update; then
+        echo "debug: 更新模式开启"
+    elif $debug; then
+        echo "debug: 调试模式开启"
+    else
+        echo "debug: 默认模式"
+    fi
+
+    # $BASH_SOURCE[0]表示当前执行的脚本文件名包括路径。 通过 dirname 命令可以获取文件所在目录的路径
+    # DIR="$( cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd )"
+    # DIR="$( cd "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+
+    if [ "${script_path}" = "/usr/local/bin/${script_name}" ] && [ -f "${script_conf}" ]; then
+        if [ "$debug" = true ]; then
+            echo "debug: ${script_name} 菜单模式开始"
+        fi
+        # 读取环境变量
+        source ${script_conf}
+        printf "TpVer=20020202"> ${script_conf}
+
+        # 执行脚本的其它内容
+    else
+        if [ "$debug" = true ]; then
+            echo "debug: ${script_name} 初始化模式开始"
+        fi
+        # 检测系统
+        check_os_ver || exit 1
+
+        # 检测内核
+        check_os_kernel ${kernel_ver} || exit 1
+
+        # 检测python
+        check_python_ver ${python_ver} || exit 1
+
+        # 检测docker
+        check_docker_ver ${docker_ver} || exit 1
+
+        # 检测docker_compose
+        check_docker_compose ${docker_compose_ver} || exit 1
+
+        # 检测docker空间
+        check_docker_space ${docker_space} || exit 1
+
+        # 初始化TP
+        if [ -f "/usr/local/bin/${script_name}" ]; then
+            update_file "${script_path}" "/usr/local/bin/${script_name}"
+            echo "info: TP命令 OK "
+        else
+            mkdir -p /opt
+            update_file "${script_path}" "/usr/local/bin/${script_name}"
+            chmod +x "/usr/local/bin/${script_name}"
+        fi
+
+        if [ -f "${script_conf}" ]; then
+            echo "info: TP配置 OK "
+        else
+            printf "TpVer=20020202"> ${script_conf}
+        fi
+
+
+
+        # 基础环境和依赖
+        # chmod +x scripts/chkdep.sh
+        # scripts/chkdep.sh || exit 1
+    fi
+
+
+    # load_config             # 载入配置文件
+    # load_data "$CONFIG"     # 载入数据
+    # setup_logging           # 设置日志记录器
+
+    # do_something "$DATA"    # 调用其他函数完成具体功能
+    # output_result           # 输出结果
+}
+
+source <(grep -E '^(ID|VERSION_ID|NAME)=' /etc/os-release) # 获取操作系统类型和版本号
+almalinux_ver=8.7
+centos_ver=7.9
+debian_ver=10.6
+ubuntu_ver=18.04
+kernel_ver=4.18.0
+python_ver=3.8.6
+docker_ver=20.10.5
+docker_space=20
+docker_compose_ver=2.16.0
+
+script_path=$(readlink -f "$0")             # 获取脚本 程序路径
+script_name=$(basename "${script_path}")    # 获取脚本 自身名称
+script_conf=/opt/${script_name}.env         # 定义脚本 配置路径
+
+# echo "script_path ${script_path}"
+# echo "script_name ${script_name}"
+# echo "script_conf ${script_conf}"
+
+# 调用函数
+main "$@"
